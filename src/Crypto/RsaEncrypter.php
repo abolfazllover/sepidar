@@ -8,7 +8,7 @@ use SimpleXMLElement;
 class RsaEncrypter
 {
     /**
-     * رمزنگاری ArbitraryCode مطابق پیاده‌سازی سپیدar:
+     * رمزنگاری ArbitraryCode مطابق پیاده‌سازی سپیدار:
      * UUID → ۱۶ بایت باینری → RSA PKCS#1 v1.5 → Base64
      */
     public static function encryptArbitraryCode(string $uuid, string $publicKeyXml): string

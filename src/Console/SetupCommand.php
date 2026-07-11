@@ -8,19 +8,19 @@ use Illuminate\Console\Command;
 class SetupCommand extends Command
 {
     protected $signature = 'sepidar:setup
-                            {--url= : آدرس API سپیدar}
+                            {--url= : آدرس API سپیدار}
                             {--username= : نام کاربری}
                             {--password= : رمز عبور}
                             {--version= : نسخه API}
                             {--serial= : سریال ۸ کاراکتری دستگاه}';
 
-    protected $description = 'تنظیم و اتصال اولیه به API سپیدar';
+    protected $description = 'تنظیم و اتصال اولیه به API سپیدار';
 
     public function handle(SepidarClient $client): int
     {
         $config = config('sepidar');
 
-        $this->info('تنظیمات اتصال به سپیدar');
+        $this->info('تنظیمات اتصال به سپیدار');
         $this->newLine();
 
         $settings = [
@@ -56,7 +56,7 @@ class SetupCommand extends Command
             $client->configure($settings)->connect();
 
             $this->newLine();
-            $this->info('اتصال به سپیدar با موفقیت برقرار شد.');
+            $this->info('اتصال به سپیدار با موفقیت برقرار شد.');
             $this->table(
                 ['تنظیم', 'مقدار'],
                 [
