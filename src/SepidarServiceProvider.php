@@ -3,6 +3,7 @@
 namespace Ahmadi\LaravelSepidar;
 
 use Ahmadi\LaravelSepidar\Client\SepidarClient;
+use Ahmadi\LaravelSepidar\Console\SetupCommand;
 use Ahmadi\LaravelSepidar\Contracts\SepidarClientInterface;
 use Illuminate\Support\ServiceProvider;
 
@@ -35,6 +36,10 @@ class SepidarServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/sepidar.php' => config_path('sepidar.php'),
             ], 'sepidar-config');
+
+            $this->commands([
+                SetupCommand::class,
+            ]);
         }
     }
 }

@@ -34,6 +34,11 @@ class SepidarManager
         return $this->client;
     }
 
+    public function connect(): SepidarClient
+    {
+        return $this->client->connect();
+    }
+
     public function devices(): DeviceResource
     {
         return new DeviceResource($this->client);

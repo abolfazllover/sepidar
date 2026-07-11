@@ -6,6 +6,7 @@ use Ahmadi\LaravelSepidar\SepidarManager;
 use Illuminate\Support\Facades\Facade;
 
 /**
+ * @method static \Ahmadi\LaravelSepidar\Client\SepidarClient connect()
  * @method static \Ahmadi\LaravelSepidar\Client\SepidarClient client()
  * @method static \Ahmadi\LaravelSepidar\Resources\DeviceResource devices()
  * @method static \Ahmadi\LaravelSepidar\Resources\AuthResource auth()

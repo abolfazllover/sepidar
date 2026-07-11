@@ -8,9 +8,10 @@ use SimpleXMLElement;
 class RsaEncrypter
 {
     /**
-     * رمزنگاری متن با کلید عمومی RSA (PKCS#1 v1.5) — خروجی Base64.
+     * رمزنگاری ArbitraryCode مطابق پیاده‌سازی سپیدar:
+     * UUID → ۱۶ بایت باینری → RSA PKCS#1 v1.5 → Base64
      */
-    public static function encrypt(string $plaintext, string $publicKeyXml): string
+    public static function encryptArbitraryCode(string $uuid, string $publicKeyXml): string
     {
         $pem = self::publicKeyPemFromXml($publicKeyXml);
 
@@ -20,14 +21,43 @@ class RsaEncrypter
             throw new SepidarException('Invalid Sepidar RSA public key.');
         }
 
+        $packed = self::packUuid($uuid);
         $encrypted = '';
-        $success = openssl_public_encrypt($plaintext, $encrypted, $publicKey, OPENSSL_PKCS1_PADDING);
+        $success = openssl_public_encrypt($packed, $encrypted, $publicKey, OPENSSL_PKCS1_PADDING);
 
         if (! $success) {
             throw new SepidarException('RSA encryption failed: '.openssl_error_string());
         }
 
         return base64_encode($encrypted);
+    }
+
+    /**
+     * @deprecated Use encryptArbitraryCode() for Sepidar API headers.
+     */
+    public static function encrypt(string $plaintext, string $publicKeyXml): string
+    {
+        return self::encryptArbitraryCode($plaintext, $publicKeyXml);
+    }
+
+    /**
+     * تبدیل UUID به ۱۶ بایت باینری (مطابق RSAEncript.php).
+     */
+    public static function packUuid(string $uuid): string
+    {
+        $hex = preg_replace('/[^a-fA-F0-9]/', '', $uuid);
+
+        if (strlen($hex) !== 32) {
+            throw new SepidarException('Invalid UUID for Sepidar encryption.');
+        }
+
+        $packed = '';
+
+        for ($i = 0; $i < 16; $i++) {
+            $packed .= chr(hexdec(substr($hex, $i * 2, 2)));
+        }
+
+        return $packed;
     }
 
     public static function publicKeyPemFromXml(string $xml): string
@@ -46,6 +76,11 @@ class RsaEncrypter
         return "-----BEGIN PUBLIC KEY-----\n"
             .chunk_split(base64_encode($der), 64, "\n")
             ."-----END PUBLIC KEY-----\n";
+    }
+
+    public static function publicKeyXmlFromModulusExponent(string $modulusBase64, string $exponentBase64): string
+    {
+        return '<RSAKeyValue><Modulus>'.$modulusBase64.'</Modulus><Exponent>'.$exponentBase64.'</Exponent></RSAKeyValue>';
     }
 
     private static function encodePublicKeyDer(string $modulus, string $exponent): string

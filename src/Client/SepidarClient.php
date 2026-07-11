@@ -6,17 +6,18 @@ use Ahmadi\LaravelSepidar\Contracts\SepidarClientInterface;
 use Ahmadi\LaravelSepidar\Crypto\AesEncrypter;
 use Ahmadi\LaravelSepidar\Crypto\RsaEncrypter;
 use Ahmadi\LaravelSepidar\Exceptions\SepidarApiException;
+use Ahmadi\LaravelSepidar\Support\CredentialStore;
 use Ahmadi\LaravelSepidar\Support\DeviceSerial;
+use Ahmadi\LaravelSepidar\Support\PublicKeyResolver;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SepidarClient implements SepidarClientInterface
 {
-    protected array $config;
+    protected CredentialStore $store;
 
     protected ?string $token = null;
 
@@ -26,16 +27,30 @@ class SepidarClient implements SepidarClientInterface
 
     protected ?string $deviceSerial = null;
 
-    public function __construct(array $config)
-    {
-        $this->config = $config;
-        $this->deviceSerial = $config['device_serial'] ?? null;
-        $this->integrationId = isset($config['integration_id']) ? (int) $config['integration_id'] : null;
-        $this->publicKeyXml = $config['public_key'] ?? null;
+    protected ?string $generationVersion = null;
 
-        if (($config['cache_token'] ?? true) && $cached = Cache::get($config['token_cache_key'] ?? 'sepidar.jwt_token')) {
-            $this->token = $cached;
-        }
+    protected bool $bootstrapped = false;
+
+    public function __construct(
+        protected array $config,
+        ?CredentialStore $store = null,
+    ) {
+        $this->store = $store ?? new CredentialStore(
+            $config['credentials_path'],
+            $config['legacy_credentials_path'] ?? null,
+        );
+
+        $this->hydrateFromStore();
+    }
+
+    /**
+     * اتصال خودکار: ثبت دستگاه (در صورت نیاز) + ورود + آماده‌سازی توکن.
+     */
+    public function connect(): self
+    {
+        $this->bootstrap(force: true);
+
+        return $this;
     }
 
     public function get(string $endpoint, array $query = []): array
@@ -58,9 +73,6 @@ class SepidarClient implements SepidarClientInterface
         return $this->request('delete', $endpoint, ['json' => $data]);
     }
 
-    /**
-     * درخواست بدون هدر احراز هویت سپیدار.
-     */
     public function getPublic(string $endpoint, array $query = []): array
     {
         return $this->send('get', $endpoint, ['query' => $query], secured: false);
@@ -71,15 +83,14 @@ class SepidarClient implements SepidarClientInterface
         return $this->send('post', $endpoint, ['json' => $data], secured: false);
     }
 
-    /**
-     * ثبت دستگاه و دریافت کلید عمومی RSA.
-     */
     public function registerDevice(?string $serial = null): array
     {
-        $serial = $serial ?? $this->deviceSerial;
+        $serial = $serial ?? $this->deviceSerial ?? $this->config['device_serial'] ?? null;
 
         if (! $serial) {
-            throw SepidarApiException::configuration('Device serial is required for registration.');
+            throw SepidarApiException::configuration(
+                'Device serial is required. Set SEPIDAR_DEVICE_SERIAL or run: php artisan sepidar:setup'
+            );
         }
 
         $integrationId = DeviceSerial::integrationId($serial);
@@ -88,36 +99,46 @@ class SepidarClient implements SepidarClientInterface
 
         $response = $this->postPublic('Devices/Register', [
             'Cypher' => AesEncrypter::encrypt((string) $integrationId, $key, $iv),
-            'IV' => base64_encode($iv),
+            'iv' => base64_encode($iv),
             'IntegrationID' => $integrationId,
         ]);
 
-        $publicKeyXml = AesEncrypter::decrypt($response['Cypher'], $key, $response['IV']);
+        $responseIv = $response['IV'] ?? $response['iv'] ?? null;
+
+        if (! $responseIv || ! isset($response['Cypher'])) {
+            throw SepidarApiException::configuration('Invalid register device response from Sepidar.');
+        }
 
         $this->deviceSerial = $serial;
         $this->integrationId = $integrationId;
-        $this->publicKeyXml = $publicKeyXml;
+        $this->publicKeyXml = AesEncrypter::decrypt($response['Cypher'], $key, $responseIv);
+
+        $this->store->put([
+            'Cypher' => $response['Cypher'],
+            'IV' => $responseIv,
+            'DeviceTitle' => $response['DeviceTitle'] ?? null,
+            'IntegrationID' => $integrationId,
+            'device_serial' => $serial,
+        ]);
 
         return [
             'DeviceTitle' => $response['DeviceTitle'] ?? null,
             'IntegrationID' => $integrationId,
-            'PublicKey' => $publicKeyXml,
+            'Cypher' => $response['Cypher'],
+            'IV' => $responseIv,
         ];
     }
 
-    /**
-     * ورود و دریافت JWT Token.
-     */
     public function login(?string $username = null, ?string $password = null): array
     {
         $username = $username ?? $this->config['username'] ?? null;
         $password = $password ?? $this->config['password'] ?? null;
 
         if (! $username || ! $password) {
-            throw SepidarApiException::configuration('Username and password are required.');
+            throw SepidarApiException::configuration('SEPIDAR_USERNAME and SEPIDAR_PASSWORD are required.');
         }
 
-        $this->ensureDeviceIsReady();
+        $this->ensureCryptoReady();
 
         $response = $this->send('post', 'users/login', [
             'json' => [
@@ -126,49 +147,30 @@ class SepidarClient implements SepidarClientInterface
             ],
         ], secured: 'login');
 
-        $this->setToken($response['Token'] ?? '');
+        $this->token = $response['Token'] ?? '';
+        $this->store->put(['Token' => $this->token]);
 
         return $response;
     }
 
     public function authenticate(): self
     {
-        if (! $this->token) {
-            $this->login();
-        }
-
-        return $this;
+        return $this->connect();
     }
 
     public function isAuthorized(): bool
     {
-        $this->ensureDeviceIsReady();
-
         if (! $this->token) {
             return false;
         }
 
-        $response = $this->send('get', 'IsAuthorized', secured: true);
+        try {
+            $this->ensureCryptoReady();
 
-        return $response === true;
-    }
-
-    public function setToken(?string $token): self
-    {
-        $this->token = $token;
-
-        if ($token && ($this->config['cache_token'] ?? true)) {
-            Cache::forever($this->config['token_cache_key'] ?? 'sepidar.jwt_token', $token);
+            return $this->send('get', 'IsAuthorized', secured: true) === true;
+        } catch (SepidarApiException) {
+            return false;
         }
-
-        return $this;
-    }
-
-    public function setPublicKey(string $publicKeyXml): self
-    {
-        $this->publicKeyXml = $publicKeyXml;
-
-        return $this;
     }
 
     public function setDeviceSerial(string $serial): self
@@ -184,9 +186,9 @@ class SepidarClient implements SepidarClientInterface
         return $this->integrationId;
     }
 
-    public function getPublicKey(): ?string
+    public function getGenerationVersion(): string
     {
-        return $this->publicKeyXml;
+        return $this->resolveGenerationVersion();
     }
 
     public function getToken(): ?string
@@ -196,13 +198,73 @@ class SepidarClient implements SepidarClientInterface
 
     protected function request(string $method, string $endpoint, array $options = []): array
     {
-        $this->ensureDeviceIsReady();
+        $this->bootstrap();
 
-        if (! $this->token) {
+        return $this->send($method, $endpoint, $options, secured: true);
+    }
+
+    protected function bootstrap(bool $force = false): void
+    {
+        if ($this->bootstrapped && ! $force) {
+            return;
+        }
+
+        $this->validateConfig();
+
+        if (! $this->store->isRegistered()) {
+            $this->registerDevice();
+        }
+
+        $this->hydrateFromStore();
+        $this->ensureCryptoReady();
+
+        if (! $this->token || ! $this->isAuthorized()) {
             $this->login();
         }
 
-        return $this->send($method, $endpoint, $options, secured: true);
+        $this->bootstrapped = true;
+    }
+
+    protected function validateConfig(): void
+    {
+        foreach (['base_url', 'username', 'password'] as $key) {
+            if (empty($this->config[$key])) {
+                throw SepidarApiException::configuration("SEPIDAR_{$this->envKey($key)} is required.");
+            }
+        }
+    }
+
+    protected function envKey(string $key): string
+    {
+        return strtoupper($key === 'base_url' ? 'BASE_URL' : $key);
+    }
+
+    protected function hydrateFromStore(): void
+    {
+        $this->deviceSerial = $this->config['device_serial']
+            ?? $this->store->get('device_serial')
+            ?? $this->deviceSerial;
+
+        $this->integrationId = $this->store->get('IntegrationID')
+            ?? ($this->deviceSerial ? DeviceSerial::integrationId($this->deviceSerial) : null)
+            ?? $this->integrationId;
+
+        $this->token = $this->store->get('Token') ?? $this->token;
+
+        $this->generationVersion = $this->config['generation_version']
+            ?? $this->store->get('GenerationVersion')
+            ?? $this->generationVersion;
+    }
+
+    protected function ensureCryptoReady(): void
+    {
+        if (! $this->integrationId) {
+            throw SepidarApiException::configuration('Device is not registered. Run: php artisan sepidar:setup');
+        }
+
+        if (! $this->publicKeyXml) {
+            $this->publicKeyXml = PublicKeyResolver::fromStore($this->store);
+        }
     }
 
     protected function send(string $method, string $endpoint, array $options = [], bool|string $secured = true): array|bool
@@ -256,15 +318,13 @@ class SepidarClient implements SepidarClientInterface
 
     protected function buildSepidarHeaders(bool $withAuthorization): array
     {
-        $this->ensureDeviceIsReady();
-
         $arbitraryCode = (string) Str::uuid();
 
         $headers = [
-            'GenerationVersion' => (string) ($this->config['generation_version'] ?? '101'),
+            'GenerationVersion' => $this->resolveGenerationVersion(),
             'IntegrationID' => (string) $this->integrationId,
             'ArbitraryCode' => $arbitraryCode,
-            'EncArbitraryCode' => RsaEncrypter::encrypt($arbitraryCode, $this->publicKeyXml),
+            'EncArbitraryCode' => RsaEncrypter::encryptArbitraryCode($arbitraryCode, $this->publicKeyXml),
         ];
 
         if ($withAuthorization && $this->token) {
@@ -274,24 +334,24 @@ class SepidarClient implements SepidarClientInterface
         return $headers;
     }
 
-    protected function ensureDeviceIsReady(): void
+    protected function resolveGenerationVersion(): string
     {
-        if ($this->integrationId === null && $this->deviceSerial) {
-            $this->integrationId = DeviceSerial::integrationId($this->deviceSerial);
+        if ($this->generationVersion) {
+            return (string) $this->generationVersion;
         }
 
-        if ($this->integrationId === null) {
-            throw SepidarApiException::configuration('Integration ID or device serial is required.');
-        }
+        $result = $this->getPublic('General/GenerationVersion');
+        $this->generationVersion = (string) ($result['GenerationVersion'] ?? '101');
+        $this->store->put(['GenerationVersion' => $this->generationVersion]);
 
-        if (! $this->publicKeyXml) {
-            throw SepidarApiException::configuration('Public key is required. Run registerDevice() first or set SEPIDAR_PUBLIC_KEY.');
-        }
+        return $this->generationVersion;
     }
 
     protected function apiBaseUrl(): string
     {
-        return rtrim($this->config['base_url'], '/').'/api';
+        $baseUrl = rtrim($this->config['base_url'], '/');
+
+        return str_ends_with($baseUrl, '/api') ? $baseUrl : $baseUrl.'/api';
     }
 
     protected function url(string $endpoint): string

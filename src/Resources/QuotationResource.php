@@ -21,7 +21,7 @@ class QuotationResource extends Resource
 
     public function create(array $data): array
     {
-        return $this->client->post('Quotations/', $data);
+        return $this->client->post('Quotations', $data);
     }
 
     public function createBatch(array $quotations): array
