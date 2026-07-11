@@ -49,6 +49,7 @@ abstract class TestCase extends Orchestra
         $app['config']->set('sepidar.username', 'admin');
         $app['config']->set('sepidar.password', 'secret');
         $app['config']->set('sepidar.generation_version', '111');
+        $app['config']->set('sepidar.device_serial', '100079d4');
         $app['config']->set('sepidar.credentials_path', $this->credentialsPath ?? sys_get_temp_dir().'/sepidar-test.json');
     }
 

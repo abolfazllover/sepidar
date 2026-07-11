@@ -53,6 +53,21 @@ class SepidarClient implements SepidarClientInterface
         return $this;
     }
 
+    public function configure(array $config): self
+    {
+        $this->config = array_merge($this->config, $config);
+
+        if (! empty($config['device_serial'])) {
+            $this->deviceSerial = $config['device_serial'];
+        }
+
+        if (! empty($config['generation_version'])) {
+            $this->generationVersion = (string) $config['generation_version'];
+        }
+
+        return $this;
+    }
+
     public function get(string $endpoint, array $query = []): array
     {
         return $this->request('get', $endpoint, ['query' => $query]);
@@ -227,16 +242,35 @@ class SepidarClient implements SepidarClientInterface
 
     protected function validateConfig(): void
     {
-        foreach (['base_url', 'username', 'password'] as $key) {
-            if (empty($this->config[$key])) {
-                throw SepidarApiException::configuration("SEPIDAR_{$this->envKey($key)} is required.");
+        $required = ['base_url', 'username', 'password', 'generation_version', 'device_serial'];
+
+        foreach ($required as $key) {
+            if ($key === 'device_serial' && $this->store->isRegistered()) {
+                continue;
+            }
+
+            $value = $this->config[$key] ?? null;
+
+            if ($key === 'device_serial' && empty($value)) {
+                $value = $this->store->get('device_serial') ?? $this->deviceSerial;
+            }
+
+            if (empty($value)) {
+                throw SepidarApiException::configuration(
+                    "SEPIDAR_{$this->envKey($key)} is required. Run: php artisan sepidar:setup"
+                );
             }
         }
     }
 
     protected function envKey(string $key): string
     {
-        return strtoupper($key === 'base_url' ? 'BASE_URL' : $key);
+        return match ($key) {
+            'base_url' => 'BASE_URL',
+            'device_serial' => 'DEVICE_SERIAL',
+            'generation_version' => 'GENERATION_VERSION',
+            default => strtoupper($key),
+        };
     }
 
     protected function hydrateFromStore(): void
